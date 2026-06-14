@@ -18,7 +18,56 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
+
+
+# ── query parsing ─────────────────────────────────────────────────────────────
+
+# "under $30", "below 30", "less than $30", "max 30", "< 30"
+_PRICE_RE = re.compile(
+    r"(?:under|below|less than|cheaper than|up to|max(?:imum)?|<)\s*\$?\s*(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+# A bare dollar amount like "$30", used only if no "under/below" phrase is found.
+_PRICE_FALLBACK_RE = re.compile(r"\$\s*(\d+(?:\.\d+)?)")
+# "size M", "size 8", "size XXS"
+_SIZE_RE = re.compile(r"\bsize\s+([A-Za-z0-9/]+)", re.IGNORECASE)
+# Standalone, unambiguous size tokens like "US 8", "W30", "W30 L32"
+_SIZE_STANDALONE_RE = re.compile(r"\b(US\s?\d+(?:\.5)?|W\d+(?:\s?L\d+)?)\b", re.IGNORECASE)
+
+
+def _parse_query(query: str) -> dict:
+    """
+    Extract a description, optional size, and optional max_price from raw text.
+
+    Returns a dict: {"description": str, "size": str | None, "max_price": float | None}.
+    Matched price/size phrases are stripped out so they don't pollute the keywords.
+    """
+    text = query
+    max_price = None
+    size = None
+
+    match = _PRICE_RE.search(text)
+    if not match:
+        match = _PRICE_FALLBACK_RE.search(text)
+    if match:
+        max_price = float(match.group(1))
+        text = text[: match.start()] + " " + text[match.end():]
+
+    match = _SIZE_RE.search(text)
+    if match:
+        size = match.group(1).strip(" .,")
+        text = text[: match.start()] + " " + text[match.end():]
+    else:
+        match = _SIZE_STANDALONE_RE.search(text)
+        if match:
+            size = match.group(1).strip()
+            text = text[: match.start()] + " " + text[match.end():]
+
+    description = re.sub(r"\s+", " ", text).strip(" .,")
+    return {"description": description, "size": size, "max_price": max_price}
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +141,67 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 1: fresh session for this interaction.
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: parse the query into description / size / max_price.
+    parsed = _parse_query(query)
+    session["parsed"] = parsed
+    if not parsed["description"]:
+        session["error"] = (
+            "Tell me what kind of piece you're after — e.g. 'vintage denim jacket' "
+            "or 'graphic tee under $30'."
+        )
+        return session
+
+    # Step 3: search. Branch on the result — this is what makes the agent
+    # respond differently to different inputs.
+    results = search_listings(
+        parsed["description"], size=parsed["size"], max_price=parsed["max_price"]
+    )
+    session["search_results"] = results
+    if not results:
+        # No match → set a helpful error and STOP. Do not call suggest_outfit.
+        bits = [f"\"{parsed['description']}\""]
+        if parsed["size"]:
+            bits.append(f"size {parsed['size']}")
+        if parsed["max_price"] is not None:
+            bits.append(f"under ${parsed['max_price']:g}")
+        session["error"] = (
+            "I couldn't find " + " ".join(bits) + ". Try broader keywords, a higher "
+            "budget, or dropping the size filter."
+        )
+        return session
+
+    # Step 4: select the top-ranked match.
+    session["selected_item"] = results[0]
+
+    # Step 5: suggest an outfit. Empty wardrobe is handled inside the tool, not
+    # treated as an error here; a real LLM failure ends the run gracefully.
+    try:
+        session["outfit_suggestion"] = suggest_outfit(
+            session["selected_item"], wardrobe
+        )
+    except Exception:
+        session["error"] = (
+            "I found a great piece but couldn't generate styling ideas right now — "
+            "here's the listing; try again in a moment."
+        )
+        return session
+
+    # Step 6: write the fit card from the outfit + selected item.
+    try:
+        session["fit_card"] = create_fit_card(
+            session["outfit_suggestion"], session["selected_item"]
+        )
+    except Exception:
+        session["error"] = (
+            "I styled your piece but couldn't write the fit card right now — "
+            "try again in a moment."
+        )
+        return session
+
+    # Step 7: success — every output field is populated and error is None.
     return session
 
 
