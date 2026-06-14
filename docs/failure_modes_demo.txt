@@ -1,0 +1,29 @@
+======================================================================
+FitFindr — Deliberate Failure-Mode Tests (Milestone 5)
+======================================================================
+
+[1] search_listings returns ZERO results (impossible query)
+    >>> search_listings('designer ballgown', size='XXS', max_price=5)
+    returns: []    <- empty list, no exception
+
+    Full agent on the same query:
+    error    : I couldn't find "designer ballgown" size XXS under $5. Try
+               broader keywords, a higher budget, or dropping the size filter.
+    fit_card : None   <- downstream tools skipped (suggest_outfit never called)
+
+[2] suggest_outfit with an EMPTY wardrobe
+    >>> suggest_outfit(<listing>, get_empty_wardrobe())
+    returns a non-empty general-advice string (no crash):
+    "This graphic tee is a great find, and its vintage vibe lends itself to a
+     variety of styling options. You can easily dress it up or down by pairing
+     it with darker wash jeans and sleek shoes for a more ..."
+    (general advice only — does not invent wardrobe items the user doesn't own)
+
+[3] create_fit_card with an EMPTY outfit string
+    >>> create_fit_card('', <listing>)
+    returns: Can't write a fit card without an outfit suggestion — find an
+             outfit first.
+
+======================================================================
+All three failure modes return a specific message — none raised an exception.
+======================================================================
